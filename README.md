@@ -156,25 +156,12 @@ You can tweak constants near the top of the script:
 It’s a single file app:
 
 ```
-index.html
+SelfLearning.html
 ```
 
 All logic, styles, and rendering live inside `index.html`. No external assets required.
 
 ---
 
-## License
+Coded and written using ChatGPT
 
-Choose a license that fits your use case. If you’re unsure, **MIT** is a permissive default:
-
-```
-MIT License – Copyright (c) 2025 <Your Name>
-```
-
----
-
-## Credits
-
-- UI and graphics: Canvas 2D, no frameworks.
-- Evolution & sensing: minimalist GA + ray casting.
-- Authored with iterative feedback to prioritize *forward motion*, *distance‑based fitness*, and *no‑clone evolution*.
