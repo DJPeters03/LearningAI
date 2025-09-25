@@ -35,7 +35,8 @@
   <header>
     <button id="btnToggle">▶ Run</button>
     <button id="btnStep" class="secondary">Step</button>
-    <button id="btnReset" class="danger">Reset</button>
+    <!-- label changed only -->
+    <button id="btnReset" class="danger">Next Map</button>
     <div class="pill">
       <label>Speed <input id="speed" type="range" min="0.2" max="5" step="0.1" value="1.0"></label>
       <label>Population <input id="pop" type="range" min="1" max="120" step="1" value="1"></label>
@@ -87,6 +88,44 @@
   const genEl = document.getElementById('gen');
   const bestEl = document.getElementById('best');
   const winsEl = document.getElementById('wins');
+
+  // Safety buffers (tweak freely)
+  const SAFETY = {
+    startRadius: 60,
+    goalRadius: 26,
+    launchDist: 140,
+    launchHalfAngle: Math.PI/4,
+    wallPad: 24
+  };
+
+  // Geometry helpers
+  function rectClosestPoint(px, py, r){
+    const cx = Math.max(r.x, Math.min(px, r.x + r.w));
+    const cy = Math.max(r.y, Math.min(py, r.y + r.h));
+    return {cx, cy};
+  }
+  function circleRectOverlap(cx, cy, rad, r){
+    const q = rectClosestPoint(cx, cy, r);
+    const dx = q.cx - cx, dy = q.cy - cy;
+    return (dx*dx + dy*dy) <= rad*rad;
+  }
+  function rectIntersectsLaunchSector(r){
+    const {cx, cy} = rectClosestPoint(WORLD.start.x, WORLD.start.y, r);
+    const vx = cx - WORLD.start.x, vy = cy - WORLD.start.y;
+    const d  = Math.hypot(vx, vy);
+    if (d === 0) return true;
+    const dir = Math.atan2(WORLD.goal.y - WORLD.start.y, WORLD.goal.x - WORLD.start.x);
+    let a = Math.atan2(vy, vx) - dir;
+    while (a >  Math.PI) a -= 2*Math.PI;
+    while (a < -Math.PI) a += 2*Math.PI;
+    return (d < SAFETY.launchDist) && (Math.abs(a) <= SAFETY.launchHalfAngle);
+  }
+  function rectInsideWorld(r){
+    return r.x >= SAFETY.wallPad &&
+           r.y >= SAFETY.wallPad &&
+           (r.x + r.w) <= (WORLD.w - SAFETY.wallPad) &&
+           (r.y + r.h) <= (WORLD.h - SAFETY.wallPad);
+  }
 
   // ===== World settings =====
   let running = false;
@@ -142,21 +181,44 @@
   function regenObstacles(n = WORLD.nObstacles) {
     const obs = [];
     const pad = 40;
-    for (let i=0;i<n;i++){
-      const mustBlock = (i < Math.min(4, n));
+    const maxAttempts = 2000;
+    let attempts = 0;
+
+    while (obs.length < n && attempts < maxAttempts) {
+      attempts++;
+
       const w = rand(40, 120);
       const h = rand(40, 120);
+
       let x, y;
+      const mustBlock = (obs.length < Math.min(4, n));
       if (mustBlock) {
-        const t = rand(0.25, 0.75);
-        x = lerp(WORLD.start.x, WORLD.goal.x, t) + rand(-80, 80);
-        y = lerp(WORLD.start.y, WORLD.goal.y, t) + rand(-80, 80);
+        const t = rand(0.28, 0.78);
+        x = lerp(WORLD.start.x, WORLD.goal.x, t) + rand(-90, 90);
+        y = lerp(WORLD.start.y, WORLD.goal.y, t) + rand(-90, 90);
       } else {
         x = rand(pad, WORLD.w - pad - w);
         y = rand(pad, WORLD.h - pad - h);
       }
-      obs.push({x, y, w, h});
+
+      const r = {x, y, w, h};
+
+      if (!rectInsideWorld(r)) continue;
+      const startBlock = circleRectOverlap(WORLD.start.x, WORLD.start.y, SAFETY.startRadius + 8, r);
+      if (startBlock) continue;
+      const goalBlock  = circleRectOverlap(WORLD.goal.x,  WORLD.goal.y,  SAFETY.goalRadius, r);
+      if (goalBlock) continue;
+      if (rectIntersectsLaunchSector(r)) continue;
+
+      let overlaps = false;
+      for (const o of obs) {
+        if (x < o.x + o.w && x + w > o.x && y < o.y + o.h && y + h > o.y) { overlaps = true; break; }
+      }
+      if (overlaps) continue;
+
+      obs.push(r);
     }
+
     WORLD.obstacles = obs;
   }
 
@@ -176,17 +238,15 @@
       W2: new Float32Array(b.W2), b2: new Float32Array(b.b2)
     };
   }
-  // mix two arrays element-wise with random alpha per-weight
   function mixArrays(a, b){
     const out = new Float32Array(a.length);
     for (let i=0;i<a.length;i++){
-      const alpha = Math.random();            // 0..1 random per weight
+      const alpha = Math.random();
       out[i] = (1-alpha)*a[i] + alpha*b[i];
     }
     return out;
   }
   function mixBrains(p, q){
-    // parents p and q must share shape
     return {
       nIn: p.nIn, nH: p.nH,
       W1: mixArrays(p.W1, q.W1),
@@ -196,8 +256,7 @@
     };
   }
   function addMinimumNoise(b, floorRate=0.03){
-    // Always add a minimum jitter so no child is an exact copy
-    const s = floorRate; // 3% baseline magnitude
+    const s = floorRate;
     const jitter = (arr) => {
       for (let i=0;i<arr.length;i++){
         arr[i] += (Math.random()*2-1) * 0.1 * s;
@@ -228,13 +287,13 @@
       for (let i=0;i<b.nH;i++) s += b.W2[k*b.nH + i] * h[i];
       y[k] = k===0 ? Math.tanh(s) : 1/(1+Math.exp(-s));
     }
-    return y; // [steer ∈ [-1,1], throttle ∈ [0,1]]
+    return y; // [steer, throttle]
   }
 
   // ===== Agent =====
-  const TWO_TURNS = Math.PI * 4;     // disqualify after two full rotations
-  const STALE_LIMIT = 120;           // ticks without improving minDist -> cull agent
-  const STALE_EPS   = 0.5;           // "meaningful" improvement threshold in px
+  const TWO_TURNS = Math.PI * 4;
+  const STALE_LIMIT = 120;
+  const STALE_EPS   = 0.5;
 
   function makeAgent(params){
     const agent = {
@@ -273,14 +332,14 @@
     const n = agent.sensors;
     const maxR = 120;
     const inputs = [];
-    const spread = Math.PI * 1.2; // +/- ~108°
+    const spread = Math.PI * 1.2;
     for (let i=0;i<n;i++){
       const a = agent.ang + (i/(n-1)-0.5)*spread;
       const res = castRay(agent.x, agent.y, a, maxR);
       inputs.push(res/maxR);
     }
     const gAng = Math.atan2(WORLD.goal.y-agent.y, WORLD.goal.x-agent.x);
-    const dAng = wrapPI(gAng - agent.ang) / Math.PI; // [-1,1]
+    const dAng = wrapPI(gAng - agent.ang) / Math.PI;
     const dGoal = dist(agent.x,agent.y, WORLD.goal.x,WORLD.goal.y);
     inputs.push(dAng);
     inputs.push(Math.min(1, dGoal / Math.hypot(WORLD.w, WORLD.h)));
@@ -335,7 +394,7 @@
 
     if (a.alive && dist(a.x,a.y, WORLD.goal.x,WORLD.goal.y) < (WORLD.goal.r + a.radius)){
       a.reached = true; a.alive = false; wins++;
-      roundWon = true;
+      roundWon = true; // triggers evolution on SAME MAP
     }
 
     const dNow = dist(a.x,a.y, WORLD.goal.x,WORLD.goal.y);
@@ -358,12 +417,12 @@
 
   // ===== Population / GA =====
   let POP = [];
-  let POP_SIZE = +uiPop.value;     // starts at 1
+  let POP_SIZE = +uiPop.value;
   let SENSORS = +uiSensors.value;
   let MUT = +uiMut.value;
 
-  // Bootstrap: first two generations fully random; afterward, learn from them
-  let bootstrapArchive = []; // {brain, fit}
+  // Bootstrap first two gens random
+  let bootstrapArchive = [];
   const BOOTSTRAP_TARGET = 2;
 
   function newPopulationRandom(size = POP_SIZE){
@@ -380,11 +439,9 @@
     scored.sort((x,y)=>y.fit-x.fit);
     const bestFit = scored[0].fit;
 
-    // Keep best of this gen in archive during bootstrap (store reference brain snapshot)
     if (bootstrapArchive.length < BOOTSTRAP_TARGET){
       bootstrapArchive.push({brain: cloneBrain(scored[0].a.brain), fit: bestFit});
     } else {
-      // After bootstrap, optionally refresh the weaker of the two with a new challenger
       const idxWeak = (bootstrapArchive[0].fit < bootstrapArchive[1].fit) ? 0 : 1;
       if (bestFit > bootstrapArchive[idxWeak].fit){
         bootstrapArchive[idxWeak] = {brain: cloneBrain(scored[0].a.brain), fit: bestFit};
@@ -392,33 +449,26 @@
     }
 
     let next = [];
-
     if (bootstrapArchive.length < BOOTSTRAP_TARGET){
-      // Still bootstrapping: next pop fully random, NO copies
       for (let i=0;i<POP_SIZE;i++){
         const brain = createBrain(SENSORS + 3);
         next.push(makeAgent({brain, sensors:SENSORS}));
       }
     } else {
-      // Parents: best of archive (A,B) plus current best (C), to “loosely follow” but never copy
       const A = bootstrapArchive[0].fit >= bootstrapArchive[1].fit ? bootstrapArchive[0] : bootstrapArchive[1];
       const B = bootstrapArchive[0].fit <  bootstrapArchive[1].fit ? bootstrapArchive[0] : bootstrapArchive[1];
-      const C = scored[0].a.brain; // current best this generation
+      const C = scored[0].a.brain;
 
-      // Build children by mixing random pairs among {A.brain, B.brain, C} and ALWAYS adding noise
       const parentPool = [A.brain, B.brain, C];
-
       for (let i=0;i<POP_SIZE; i++){
         const p = parentPool[randi(0, parentPool.length)];
         let q = parentPool[randi(0, parentPool.length)];
         if (q === p && parentPool.length > 1){
-          // ensure two (possibly) different parents when pool >1
           q = parentPool[(parentPool.indexOf(p)+1)%parentPool.length];
         }
-        // mix then mutate; also enforce minimum noise so no exact clones
         let child = mixBrains(p, q);
-        addMinimumNoise(child, 0.03);     // 3% baseline jitter
-        mutateBrain(child, MUT);          // user-controlled mutation magnitude
+        addMinimumNoise(child, 0.03);
+        mutateBrain(child, MUT);
         next.push(makeAgent({brain: child, sensors:SENSORS}));
       }
     }
@@ -430,13 +480,12 @@
     bestEl.textContent = bestFit.toFixed(2);
     winsEl.textContent = wins;
 
-    resetPopulationPositions();
+    // IMPORTANT CHANGE:
+    // On win, DO NOT regenerate obstacles anymore — evolve on the SAME MAP
+    // (Map only changes via Next Map button or obstacle slider.)
+    // if (wasWin) { regenObstacles(WORLD.nObstacles); bootstrapArchive = []; }
 
-    // Only regenerate course when WON (or on user Reset)
-    if (wasWin) {
-      regenObstacles(WORLD.nObstacles);
-      bootstrapArchive = []; // new course -> re-bootstrap
-    }
+    resetPopulationPositions();
 
     genBestMinDist = Infinity;
     genStaleTicks = 0;
@@ -459,10 +508,10 @@
   }
 
   let simTicks = 0;
-  const ROUND_TICKS = 600; // ~10s @60Hz
+  const ROUND_TICKS = 600;
   let genBestMinDist = Infinity;
   let genStaleTicks = 0;
-  const GEN_STALE_LIMIT = 240; // if nobody improves for ~4s, evolve early
+  const GEN_STALE_LIMIT = 240;
 
   function update(){
     simTicks++;
@@ -483,7 +532,7 @@
 
     if (roundWon || allDone || simTicks>=ROUND_TICKS || genStaleTicks >= GEN_STALE_LIMIT){
       simTicks = 0;
-      evolve(roundWon);
+      evolve(roundWon);   // will NOT change the map anymore
       roundWon = false;
     }
   }
@@ -576,18 +625,47 @@
     ctx.closePath();
   }
 
-  // ===== Controls =====
+  // ===== Map & Controls =====
+function nextMap(){
+  // Reset evolution state to Gen 0
+  generation = 0;
+  genEl.textContent = '0';
+  bestEl.textContent = '0.00';
+  bootstrapArchive = [];          // re-bootstrap on the new course
+
+  // (Optional) also reset win counter:
+  // wins = 0; winsEl.textContent = '0';
+
+  // New course + brand-new Gen 0 population
+  regenObstacles(WORLD.nObstacles);
+  newPopulationRandom(POP_SIZE);
+  resetPopulationPositions();
+
+  // Reset round/gen timers
+  simTicks = 0;
+  genBestMinDist = Infinity;
+  genStaleTicks = 0;
+  roundWon = false;
+
+  // Redraw immediately
+  render();
+}
+
+
   btnToggle.addEventListener('click', () => {
     running = !running;
     btnToggle.textContent = running ? '⏸ Pause' : '▶ Run';
     if (running) { lastT = performance.now(); requestAnimationFrame(loop); }
   });
+
   btnStep.addEventListener('click', () => {
     if (running) return;
     for (let i=0;i<8;i++) update();
     render();
   });
-  btnReset.addEventListener('click', hardReset);
+
+  // BUTTON still id=btnReset, label changed to "Next Map"
+  btnReset.addEventListener('click', nextMap);
 
   uiSpeed.addEventListener('input', () => tickScale = +uiSpeed.value);
 
@@ -601,10 +679,11 @@
     SENSORS = +uiSensors.value;
     rebuildPopulationKeepCourse(true);
   });
+
+  // Adjusting obstacles -> regenerate map AND reset agents (already done)
   uiObs.addEventListener('change', () => {
     WORLD.nObstacles = +uiObs.value;
-    regenObstacles(WORLD.nObstacles);   // user action: obstacle count changes -> new course
-    resetPopulationPositions();
+    nextMap(); // replaces the previous inline calls
   });
 
   function rebuildPopulationKeepCourse(requiresNewBrains=false){
@@ -614,12 +693,12 @@
         const brain = createBrain(SENSORS + 3);
         next.push(makeAgent({brain, sensors:SENSORS}));
       }
-      bootstrapArchive = []; // perception changed; re-bootstrap
+      // keep archive if you want, or clear if perception changed drastically:
+      // bootstrapArchive = [];
     } else {
       for (let i=0;i<Math.min(POP.length, POP_SIZE); i++){
         const a = POP[i];
         a.sensors = SENSORS;
-        // never copy exactly: clone + minimum noise
         let b = cloneBrain(a.brain);
         addMinimumNoise(b, 0.03);
         next.push(makeAgent({brain: b, sensors:SENSORS}));
@@ -633,30 +712,24 @@
     resetPopulationPositions();
   }
 
-  function hardReset(){
-    generation = 0; wins = 0;
-    genEl.textContent = '0'; winsEl.textContent = '0';
-    bestEl.textContent = '0.00';
+  // Hard boot to initialize the very first map & population
+  function hardBoot(){
     WORLD.w = Math.round(Math.max(680, window.innerWidth  * 0.9));
     WORLD.h = Math.round(Math.max(420, (window.innerHeight-120) * 0.9));
     WORLD.start = {x: 0.1*WORLD.w, y: 0.5*WORLD.h};
     WORLD.goal  = {x: 0.9*WORLD.w, y: 0.5*WORLD.h, r: 18};
-    regenObstacles(WORLD.nObstacles);     // user-initiated reset -> new course
+    regenObstacles(WORLD.nObstacles);
     newPopulationRandom(POP_SIZE);
     resetPopulationPositions();
-    simTicks = 0;
-    genBestMinDist = Infinity;
-    genStaleTicks = 0;
-    roundWon = false;
-    bootstrapArchive = [];                // restart bootstrapping after a hard reset
     render();
   }
 
   // ===== Boot =====
   tickScale = +uiSpeed.value;
-  hardReset(); // gen0 population (size=1), random
+  hardBoot();
   setTimeout(()=>{ if(!running){ btnToggle.click(); } }, 300);
 })();
 </script>
 </body>
 </html>
+
